@@ -3,6 +3,7 @@
 
 # AWX
 from awx.main.utils.common import *  # noqa
+from awx.main.utils.generate_yml import *
 from awx.main.utils.encryption import (  # noqa
     get_encryption_key,
     encrypt_field,

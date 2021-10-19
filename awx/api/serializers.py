@@ -67,6 +67,7 @@ from awx.main.models import (
     JobLaunchConfig,
     JobNotificationMixin,
     JobTemplate,
+    AtPlaybook,
     Label,
     Notification,
     NotificationTemplate,
@@ -2787,6 +2788,8 @@ class JobOptionsSerializer(LabelsListMixin, BaseSerializer):
             'timeout',
             'use_fact_cache',
             'organization',
+            'input_json',
+            'output_playbook',
         )
         read_only_fields = ('organization',)
 
@@ -2828,6 +2831,7 @@ class JobOptionsSerializer(LabelsListMixin, BaseSerializer):
         if 'project' in self.fields and 'playbook' in self.fields:
             project = attrs.get('project', self.instance.project if self.instance else None)
             playbook = attrs.get('playbook', self.instance and self.instance.playbook or '')
+            input_json = attrs.get('input_json', self.instance and self.instance.input_json or '')
             scm_branch = attrs.get('scm_branch', self.instance.scm_branch if self.instance else None)
             ask_scm_branch_on_launch = attrs.get('ask_scm_branch_on_launch', self.instance.ask_scm_branch_on_launch if self.instance else None)
             if not project:
@@ -2839,7 +2843,17 @@ class JobOptionsSerializer(LabelsListMixin, BaseSerializer):
             if playbook_not_found:
                 raise serializers.ValidationError({'playbook': _('Playbook not found for project.')})
             if project and not playbook:
-                raise serializers.ValidationError({'playbook': _('Must select playbook for project.')})
+                if not input_json:
+                    #input_json and playbook are not passed
+                    raise serializers.ValidationError([serializers.ValidationError({'playbook': _('Must select playbook for project.')}),
+                                                       serializers.ValidationError({'input_json': _('Must pass input_json if playbook is not passed.')}),
+                                                    ])
+
+            if playbook and input_json:
+                #only one of these should be passed
+                raise serializers.ValidationError(_('Use playbook or input_json only'))
+                #raise serializers.ValidationError({'playbook': _('Must select playbook for project.')})
+            
             if scm_branch and not project.allow_override:
                 raise serializers.ValidationError({'scm_branch': _('Project does not allow overriding branch.')})
             if ask_scm_branch_on_launch and not project.allow_override:
@@ -2998,6 +3012,111 @@ class JobTemplateSerializer(JobTemplateMixin, UnifiedJobTemplateSerializer, JobO
                 all_creds.append(summarized_cred)
         summary_fields['credentials'] = all_creds
         return summary_fields
+
+class AtPlaybookSerializer(JobTemplateSerializer):
+    # show_capabilities = ['start', 'schedule', 'copy', 'edit', 'delete']
+    # capabilities_prefetch = ['admin', 'execute', {'copy': ['project.use', 'inventory.use']}]
+
+    # status = serializers.ChoiceField(choices=JobTemplate.JOB_TEMPLATE_STATUS_CHOICES, read_only=True, required=False)
+
+    class Meta:
+        model = AtPlaybook 
+        fields = (
+            '*',
+            'host_config_key',
+            'ask_scm_branch_on_launch',
+            'ask_diff_mode_on_launch',
+            'ask_variables_on_launch',
+            'ask_limit_on_launch',
+            'ask_tags_on_launch',
+            'ask_skip_tags_on_launch',
+            'ask_job_type_on_launch',
+            'ask_verbosity_on_launch',
+            'ask_inventory_on_launch',
+            'ask_credential_on_launch',
+            'survey_enabled',
+            'become_enabled',
+            'diff_mode',
+            'allow_simultaneous',
+            'custom_virtualenv',
+            'job_slice_count',
+            'webhook_service',
+            'webhook_credential',
+            'input_text',
+            'otuput_yaml',
+        )
+        read_only_fields = ('*', 'custom_virtualenv')
+
+    def get_related(self, obj):
+        res = super(AtPlaybookSerializer, self).get_related(obj)
+        res.update(
+            jobs=self.reverse('api:job_template_jobs_list', kwargs={'pk': obj.pk}),
+            schedules=self.reverse('api:job_template_schedules_list', kwargs={'pk': obj.pk}),
+            activity_stream=self.reverse('api:job_template_activity_stream_list', kwargs={'pk': obj.pk}),
+            launch=self.reverse('api:job_template_launch', kwargs={'pk': obj.pk}),
+            webhook_key=self.reverse('api:webhook_key', kwargs={'model_kwarg': 'job_templates', 'pk': obj.pk}),
+            webhook_receiver=(
+                self.reverse('api:webhook_receiver_{}'.format(obj.webhook_service), kwargs={'model_kwarg': 'job_templates', 'pk': obj.pk})
+                if obj.webhook_service
+                else ''
+            ),
+            notification_templates_started=self.reverse('api:job_template_notification_templates_started_list', kwargs={'pk': obj.pk}),
+            notification_templates_success=self.reverse('api:job_template_notification_templates_success_list', kwargs={'pk': obj.pk}),
+            notification_templates_error=self.reverse('api:job_template_notification_templates_error_list', kwargs={'pk': obj.pk}),
+            access_list=self.reverse('api:job_template_access_list', kwargs={'pk': obj.pk}),
+            survey_spec=self.reverse('api:job_template_survey_spec', kwargs={'pk': obj.pk}),
+            labels=self.reverse('api:job_template_label_list', kwargs={'pk': obj.pk}),
+            object_roles=self.reverse('api:job_template_object_roles_list', kwargs={'pk': obj.pk}),
+            instance_groups=self.reverse('api:job_template_instance_groups_list', kwargs={'pk': obj.pk}),
+            slice_workflow_jobs=self.reverse('api:job_template_slice_workflow_jobs_list', kwargs={'pk': obj.pk}),
+            copy=self.reverse('api:job_template_copy', kwargs={'pk': obj.pk}),
+        )
+        if obj.host_config_key:
+            res['callback'] = self.reverse('api:job_template_callback', kwargs={'pk': obj.pk})
+        if obj.organization_id:
+            res['organization'] = self.reverse('api:organization_detail', kwargs={'pk': obj.organization_id})
+        if obj.webhook_credential_id:
+            res['webhook_credential'] = self.reverse('api:credential_detail', kwargs={'pk': obj.webhook_credential_id})
+        return res
+
+    def validate(self, attrs):
+        def get_field_from_model_or_attrs(fd):
+            return attrs.get(fd, self.instance and getattr(self.instance, fd) or None)
+
+        inventory = get_field_from_model_or_attrs('inventory')
+        project = get_field_from_model_or_attrs('project')
+
+        if get_field_from_model_or_attrs('host_config_key') and not inventory:
+            raise serializers.ValidationError({'host_config_key': _("Cannot enable provisioning callback without an inventory set.")})
+
+        prompting_error_message = _("Must either set a default value or ask to prompt on launch.")
+        if project is None:
+            raise serializers.ValidationError({'project': _("Job Templates must have a project assigned.")})
+        elif inventory is None and not get_field_from_model_or_attrs('ask_inventory_on_launch'):
+            raise serializers.ValidationError({'inventory': prompting_error_message})
+
+        return super(AtPlaybookSerializer, self).validate(attrs)
+
+    def validate_extra_vars(self, value):
+        return vars_validate_or_raise(value)
+
+    def get_summary_fields(self, obj):
+        summary_fields = super(AtPlaybookSerializer, self).get_summary_fields(obj)
+        all_creds = []
+        # Organize credential data into multitude of deprecated fields
+        if obj.pk:
+            for cred in obj.credentials.all():
+                summarized_cred = {
+                    'id': cred.pk,
+                    'name': cred.name,
+                    'description': cred.description,
+                    'kind': cred.kind,
+                    'cloud': cred.credential_type.kind == 'cloud',
+                }
+                all_creds.append(summarized_cred)
+        summary_fields['credentials'] = all_creds
+        return summary_fields
+
 
 
 class JobTemplateWithSpecSerializer(JobTemplateSerializer):
