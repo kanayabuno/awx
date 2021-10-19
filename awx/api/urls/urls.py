@@ -48,6 +48,7 @@ from .credential import urls as credential_urls
 from .credential_input_source import urls as credential_input_source_urls
 from .role import urls as role_urls
 from .job_template import urls as job_template_urls
+from .at_playbook import urls as at_playbook_urls
 from .job import urls as job_urls
 from .job_host_summary import urls as job_host_summary_urls
 from .job_event import urls as job_event_urls
@@ -132,6 +133,8 @@ v2_urls = [
     url(r'^activity_stream/', include(activity_stream_urls)),
     url(r'^workflow_approval_templates/', include(workflow_approval_template_urls)),
     url(r'^workflow_approvals/', include(workflow_approval_urls)),
+    #adding a new apis for json to yaml
+    url(r'^at_playbooks/', include(at_playbook_urls)),
 ]
 
 

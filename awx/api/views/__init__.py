@@ -11,6 +11,11 @@ import requests
 import socket
 import sys
 import time
+import os
+import yaml
+from git import Repo
+import shutil
+import tempfile 
 from base64 import b64encode
 from collections import OrderedDict
 
@@ -146,6 +151,13 @@ from awx.api.views.organization import (  # noqa
     OrganizationAccessList,
     OrganizationObjectRolesList,
 )
+
+from awx.api.views.at_playbook import (
+    AtPlaybookList,
+    AtPlaybookDetail,
+    #AtPlaybookLaunch,
+)
+
 from awx.api.views.inventory import (  # noqa
     InventoryList,
     InventoryDetail,
@@ -2315,6 +2327,44 @@ class JobTemplateList(ListCreateAPIView):
         if ret.status_code == 201:
             job_template = models.JobTemplate.objects.get(id=ret.data['id'])
             job_template.admin_role.members.add(request.user)
+            project = job_template.project
+            if job_template.input_json and job_template.output_playbook and job_template.playbook and project.scm_type == 'git':
+                #upload to git
+                scm_url = project.scm_url
+                username = project.credential.inputs['username']
+                password = project.credential.get_input('password')
+                index = scm_url.find('github')
+                remote = scm_url[:index] + str(username) + ':' + str(password) + '@' + scm_url[index:]
+
+                try:
+                    #clone
+                    shutil.rmtree("temp/")
+                    Repo.clone_from(remote, "temp/")
+
+                    path = os.path.join("temp/", job_template.playbook)
+                    with open(path, 'w') as outfile:
+                        yaml.dump(yaml.safe_load(job_template.output_playbook), outfile, default_flow_style=False, sort_keys=False)
+
+                    repo = Repo("temp/")
+                    repo.git.add('--all')
+                    repo.index.commit("commit from python script")
+                    origin = repo.remote(name='origin')
+                    origin.push()
+                    shutil.rmtree("temp/")
+                except:
+                    return Response({}, status=status.HTTP_400_BAD_REQUEST)
+
+                #sync project
+                if project.can_update:
+                    project_update = project.update()
+                    if not project_update:
+                        return Response({}, status=status.HTTP_400_BAD_REQUEST)
+                    else:
+                        data = OrderedDict()
+                        data['project_update'] = project_update.id
+                        data.update(serializers.ProjectUpdateSerializer(project_update, context=self.get_serializer_context()).to_representation(project_update))
+                        headers = {'Location': project_update.get_absolute_url(request=request)}
+                        return Response(data, headers=headers, status=status.HTTP_202_ACCEPTED)
         return ret
 
 

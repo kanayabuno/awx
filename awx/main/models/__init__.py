@@ -28,6 +28,7 @@ from awx.main.models.jobs import (  # noqa
     JobTemplate,
     SystemJob,
     SystemJobTemplate,
+    AtPlaybook,
 )
 from awx.main.models.events import (  # noqa
     AdHocCommandEvent,

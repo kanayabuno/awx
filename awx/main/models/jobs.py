@@ -43,7 +43,7 @@ from awx.main.models.notifications import (
     NotificationTemplate,
     JobNotificationMixin,
 )
-from awx.main.utils import parse_yaml_or_json, getattr_dne, NullablePromptPseudoField
+from awx.main.utils import parse_yaml_or_json, getattr_dne, NullablePromptPseudoField, json_to_yaml
 from awx.main.fields import ImplicitRoleField, JSONField, AskForField
 from awx.main.models.mixins import (
     ResourceMixin,
@@ -101,6 +101,14 @@ class JobOptions(BaseModel):
         max_length=1024,
         default='',
         blank=True,
+    )
+    input_json= models.TextField(
+        blank=True,
+        default='',
+    )
+    output_playbook = models.TextField(
+        blank=True,
+        default='',
     )
     scm_branch = models.CharField(
         max_length=1024,
@@ -196,6 +204,16 @@ class JobOptions(BaseModel):
             needed.extend(cred.passwords_needed)
         return needed
 
+    def save(self, *args, **kwargs):
+        input_json = self.input_json
+        output_playbook = self.output_playbook
+        playbook = self.playbook
+
+        if input_json and not playbook:
+            self.output_playbook = json_to_yaml(input_json)
+            self.playbook = str(self.name) + '.yml'
+
+        return super(JobOptions, self).save(*args, **kwargs)
 
 class JobTemplate(UnifiedJobTemplate, JobOptions, SurveyJobTemplateMixin, ResourceMixin, CustomVirtualEnvMixin, RelatedJobsMixin, WebhookTemplateMixin):
     """
@@ -519,6 +537,246 @@ class JobTemplate(UnifiedJobTemplate, JobOptions, SurveyJobTemplateMixin, Resour
 
     def _get_related_jobs(self):
         return UnifiedJob.objects.filter(unified_job_template=self)
+
+class AtPlaybook(JobTemplate):
+    """
+    """
+
+    # FIELDS_TO_PRESERVE_AT_COPY = ['labels', 'instance_groups', 'credentials', 'survey_spec']
+    # FIELDS_TO_DISCARD_AT_COPY = ['vault_credential', 'credential']
+    # SOFT_UNIQUE_TOGETHER = [('polymorphic_ctype', 'name', 'organization')]
+
+    class Meta:
+        app_label = 'main'
+        ordering = ('id',)
+
+    input_text = models.TextField(
+        blank = True,
+        default = '',
+    )
+
+    output_yaml = models.TextField(
+        blank = True,
+        default = '',
+    )
+
+#    def create_job(self, **kwargs):
+#        """
+#        Create a new job based on this template.
+#        """
+#        logger.debug('create_job: self:%s args:%s', self, kwargs)
+#        return self.create_unified_job(**kwargs)
+#
+#    def get_effective_slice_ct(self, kwargs):
+#        actual_inventory = self.inventory
+#        if self.ask_inventory_on_launch and 'inventory' in kwargs:
+#            actual_inventory = kwargs['inventory']
+#        if actual_inventory:
+#            return min(self.job_slice_count, actual_inventory.hosts.count())
+#        else:
+#            return self.job_slice_count
+#
+    def save(self, *args, **kwargs):
+        update_fields = kwargs.get('update_fields', [])
+        # if project is deleted for some reason, then keep the old organization
+        # to retain ownership for organization admins
+        if self.project and self.project.organization_id != self.organization_id:
+            self.organization_id = self.project.organization_id
+            if 'organization' not in update_fields and 'organization_id' not in update_fields:
+                update_fields.append('organization_id')
+        return super(AtPlaybook, self).save(*args, **kwargs)
+#
+#    def validate_unique(self, exclude=None):
+#        """Custom over-ride for JT specifically
+#        because organization is inferred from project after full_clean is finished
+#        thus the organization field is not yet set when validation happens
+#        """
+#        errors = []
+#        for ut in JobTemplate.SOFT_UNIQUE_TOGETHER:
+#            kwargs = {'name': self.name}
+#            if self.project:
+#                kwargs['organization'] = self.project.organization_id
+#            else:
+#                kwargs['organization'] = None
+#            qs = JobTemplate.objects.filter(**kwargs)
+#            if self.pk:
+#                qs = qs.exclude(pk=self.pk)
+#            if qs.exists():
+#                errors.append('%s with this (%s) combination already exists.' % (JobTemplate.__name__, ', '.join(set(ut) - {'polymorphic_ctype'})))
+#        if errors:
+#            raise ValidationError(errors)
+#
+#    def create_unified_job(self, **kwargs):
+#        prevent_slicing = kwargs.pop('_prevent_slicing', False)
+#        slice_ct = self.get_effective_slice_ct(kwargs)
+#        slice_event = bool(slice_ct > 1 and (not prevent_slicing))
+#        if slice_event:
+#            # A Slice Job Template will generate a WorkflowJob rather than a Job
+#            from awx.main.models.workflow import WorkflowJobTemplate, WorkflowJobNode
+#
+#            kwargs['_unified_job_class'] = WorkflowJobTemplate._get_unified_job_class()
+#            kwargs['_parent_field_name'] = "job_template"
+#            kwargs.setdefault('_eager_fields', {})
+#            kwargs['_eager_fields']['is_sliced_job'] = True
+#        elif self.job_slice_count > 1 and (not prevent_slicing):
+#            # Unique case where JT was set to slice but hosts not available
+#            kwargs.setdefault('_eager_fields', {})
+#            kwargs['_eager_fields']['job_slice_count'] = 1
+#        elif prevent_slicing:
+#            kwargs.setdefault('_eager_fields', {})
+#            kwargs['_eager_fields'].setdefault('job_slice_count', 1)
+#        job = super(JobTemplate, self).create_unified_job(**kwargs)
+#        if slice_event:
+#            for idx in range(slice_ct):
+#                create_kwargs = dict(workflow_job=job, unified_job_template=self, ancestor_artifacts=dict(job_slice=idx + 1))
+#                WorkflowJobNode.objects.create(**create_kwargs)
+#        return job
+#
+#    def get_absolute_url(self, request=None):
+#        return reverse('api:job_template_detail', kwargs={'pk': self.pk}, request=request)
+#
+#    def can_start_without_user_input(self, callback_extra_vars=None):
+#        """
+#        Return whether job template can be used to start a new job without
+#        requiring any user input.
+#        """
+#        variables_needed = False
+#        if callback_extra_vars:
+#            extra_vars_dict = parse_yaml_or_json(callback_extra_vars)
+#            for var in self.variables_needed_to_start:
+#                if var not in extra_vars_dict:
+#                    variables_needed = True
+#                    break
+#        elif self.variables_needed_to_start:
+#            variables_needed = True
+#        prompting_needed = False
+#        # The behavior of provisioning callback should mimic
+#        # that of job template launch, so prompting_needed should
+#        # not block a provisioning callback from creating/launching jobs.
+#        if callback_extra_vars is None:
+#            for ask_field_name in set(self.get_ask_mapping().values()):
+#                if getattr(self, ask_field_name):
+#                    prompting_needed = True
+#                    break
+#        return not prompting_needed and not self.passwords_needed_to_start and not variables_needed
+#
+#    def _accept_or_ignore_job_kwargs(self, **kwargs):
+#        exclude_errors = kwargs.pop('_exclude_errors', [])
+#        prompted_data = {}
+#        rejected_data = {}
+#        accepted_vars, rejected_vars, errors_dict = self.accept_or_ignore_variables(
+#            kwargs.get('extra_vars', {}), _exclude_errors=exclude_errors, extra_passwords=kwargs.get('survey_passwords', {})
+#        )
+#        if accepted_vars:
+#            prompted_data['extra_vars'] = accepted_vars
+#        if rejected_vars:
+#            rejected_data['extra_vars'] = rejected_vars
+#
+#        # Handle all the other fields that follow the simple prompting rule
+#        for field_name, ask_field_name in self.get_ask_mapping().items():
+#            if field_name not in kwargs or field_name == 'extra_vars' or kwargs[field_name] is None:
+#                continue
+#
+#            new_value = kwargs[field_name]
+#            old_value = getattr(self, field_name)
+#
+#            field = self._meta.get_field(field_name)
+#            if isinstance(field, models.ManyToManyField):
+#                old_value = set(old_value.all())
+#                new_value = set(kwargs[field_name]) - old_value
+#                if not new_value:
+#                    continue
+#
+#            if new_value == old_value:
+#                # no-op case: Fields the same as template's value
+#                # counted as neither accepted or ignored
+#                continue
+#            elif field_name == 'scm_branch' and old_value == '' and self.project and new_value == self.project.scm_branch:
+#                # special case of "not provided" for branches
+#                # job template does not provide branch, runs with default branch
+#                continue
+#            elif getattr(self, ask_field_name):
+#                # Special case where prompts can be rejected based on project setting
+#                if field_name == 'scm_branch':
+#                    if not self.project:
+#                        rejected_data[field_name] = new_value
+#                        errors_dict[field_name] = _('Project is missing.')
+#                        continue
+#                    if kwargs['scm_branch'] != self.project.scm_branch and not self.project.allow_override:
+#                        rejected_data[field_name] = new_value
+#                        errors_dict[field_name] = _('Project does not allow override of branch.')
+#                        continue
+#                # accepted prompt
+#                prompted_data[field_name] = new_value
+#            else:
+#                # unprompted - template is not configured to accept field on launch
+#                rejected_data[field_name] = new_value
+#                # Not considered an error for manual launch, to support old
+#                # behavior of putting them in ignored_fields and launching anyway
+#                if 'prompts' not in exclude_errors:
+#                    errors_dict[field_name] = _('Field is not configured to prompt on launch.')
+#
+#        if 'prompts' not in exclude_errors and (not getattr(self, 'ask_credential_on_launch', False)) and self.passwords_needed_to_start:
+#            errors_dict['passwords_needed_to_start'] = _('Saved launch configurations cannot provide passwords needed to start.')
+#
+#        needed = self.resources_needed_to_start
+#        if needed:
+#            needed_errors = []
+#            for resource in needed:
+#                if resource in prompted_data:
+#                    continue
+#                needed_errors.append(_("Job Template {} is missing or undefined.").format(resource))
+#            if needed_errors:
+#                errors_dict['resources_needed_to_start'] = needed_errors
+#
+#        return prompted_data, rejected_data, errors_dict
+#
+#    @property
+#    def cache_timeout_blocked(self):
+#        if Job.objects.filter(job_template=self, status__in=['pending', 'waiting', 'running']).count() >= getattr(settings, 'SCHEDULE_MAX_JOBS', 10):
+#            logger.error(
+#                "Job template %s could not be started because there are more than %s other jobs from that template waiting to run"
+#                % (self.name, getattr(settings, 'SCHEDULE_MAX_JOBS', 10))
+#            )
+#            return True
+#        return False
+#
+#    def _can_update(self):
+#        return self.can_start_without_user_input()
+#
+#    @property
+#    def notification_templates(self):
+#        # Return all notification_templates defined on the Job Template, on the Project, and on the Organization for each trigger type
+#        # TODO: Currently there is no org fk on project so this will need to be added once that is
+#        #       available after the rbac pr
+#        base_notification_templates = NotificationTemplate.objects
+#        error_notification_templates = list(base_notification_templates.filter(unifiedjobtemplate_notification_templates_for_errors__in=[self, self.project]))
+#        started_notification_templates = list(
+#            base_notification_templates.filter(unifiedjobtemplate_notification_templates_for_started__in=[self, self.project])
+#        )
+#        success_notification_templates = list(
+#            base_notification_templates.filter(unifiedjobtemplate_notification_templates_for_success__in=[self, self.project])
+#        )
+#        # Get Organization NotificationTemplates
+#        if self.organization is not None:
+#            error_notification_templates = set(
+#                error_notification_templates + list(base_notification_templates.filter(organization_notification_templates_for_errors=self.organization))
+#            )
+#            started_notification_templates = set(
+#                started_notification_templates + list(base_notification_templates.filter(organization_notification_templates_for_started=self.organization))
+#            )
+#            success_notification_templates = set(
+#                success_notification_templates + list(base_notification_templates.filter(organization_notification_templates_for_success=self.organization))
+#            )
+#        return dict(error=list(error_notification_templates), started=list(started_notification_templates), success=list(success_notification_templates))
+#
+#    '''
+#    RelatedJobsMixin
+#    '''
+#
+#    def _get_related_jobs(self):
+#        return UnifiedJob.objects.filter(unified_job_template=self)
+
 
 
 class Job(UnifiedJob, JobOptions, SurveyJobMixin, JobNotificationMixin, TaskManagerJobMixin, CustomVirtualEnvMixin, WebhookMixin):
